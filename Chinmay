@@ -1,0 +1,209 @@
+Awesome—this is a strong, very demo-friendly Foundry scenario. Here’s a clear, detailed storyline you can use end-to-end, including what the problem really is, how your solution works in Foundry, what each tool does, and how to run the workshop smoothly.
+
+# What the problem actually is (business framing)
+
+A national logistics company runs thousands of vehicles across multiple regions. Operations leaders struggle because the data that matters—vehicle telemetry, fuel spend, delivery ETAs, shop work orders—lives in different systems and arrives at different cadences. When a truck is burning too much fuel, running hot, or trending toward a maintenance overrun, no one sees it soon enough. When a delivery is delayed, dispatchers don’t know the true cause or the best next action. As a result, costs rise (fuel and unexpected breakdowns), on-time delivery falls, and planners can’t prioritize maintenance intelligently.
+
+You’re proposing an **Integrated Operations Command Center** that brings these streams together in near real time, gives a shared operational picture, and—crucially—**turns insights into actions** (create a maintenance ticket, message a driver, re-sequence stops) directly from the dashboard.
+
+# What you will build (solution overview)
+
+Data flows in, is cleaned and modeled, becomes live metrics, and is exposed as operational objects (Vehicles, Deliveries, Drivers) with actions attached. Operators monitor a Workshop dashboard with live charts and alert banners, then use **Actions** and **Fusion Decisions** to trigger the right workflow (for example, schedule maintenance for a high-risk vehicle). Everything runs on Foundry:
+
+* **Ontology** to define your business objects and relationships (Vehicle, Delivery, Driver) and expose methods (actions) on them.
+* **TDS (Transforms & Data Science)** to ingest, cleanse, and compute features/health scores.
+* **Metrics** to define authoritative KPIs (fuel consumption, average delivery time, lateness rate) with lineage and schedule.
+* **Workshop** to build the live command-center experience (charts, tables, alerting tiles, filters).
+* **Actions** to let users write back (create maintenance ticket, notify dispatcher) with auditability.
+* **Fusion Decisions** to encode decision logic/thresholds and orchestrate downstream actions at scale.
+
+---
+
+## Step-by-step build (how each Foundry component fits)
+
+### 1) Ontology: the operational “language” of the app
+
+You’ll model the domain so every downstream tool speaks the same language.
+
+* **Vehicle**
+
+  * Core fields: `vehicle_id`, `fleet`, `make_model`, `last_service_date`, `odometer_km`, `fuel_capacity_l`, `telemetry.health_score`, `telemetry.engine_temp`, `telemetry.fuel_rate_lph`, `status` (OK / Warning / Critical), `next_maintenance_due_date`.
+  * Relationships: `current_driver -> Driver`, `assigned_deliveries -> [Delivery]`.
+  * **Actions** exposed on the object: `createMaintenanceTicket(vehicle_id, reason, priority)`, `notifyDispatcher(vehicle_id, message)`.
+* **Driver**
+
+  * Fields: `driver_id`, `name`, `region`, `safety_score`, `hours_on_duty`.
+  * Relationships: `assigned_vehicle -> Vehicle`, `active_delivery -> Delivery`.
+* **Delivery**
+
+  * Fields: `delivery_id`, `planned_eta`, `current_eta`, `delay_minutes`, `status` (On-time / At-Risk / Delayed), `origin`, `destination`.
+  * Relationships: `vehicle -> Vehicle`, `driver -> Driver`.
+
+**Why this matters for the workshop:** once the Ontology is in place, your Workshop app can pull and join everything without writing glue SQL. Users interact with intuitive objects (not tables).
+
+---
+
+### 2) TDS Pipelines: ingest, clean, and compute
+
+You’ll create a simple but realistic pipeline graph:
+
+**Sources**
+
+* Vehicle telemetry stream (e.g., IoT broker dump or CSV simulator): fields like timestamped `vehicle_id`, `speed_kph`, `engine_temp_c`, `fuel_used_l`, `gps`.
+* TMS/Delivery system export: delivery plans and status updates.
+* Maintenance master data: last service, service intervals, open work orders.
+
+**Transforms (TDS)**
+
+* **Standardize & validate**: schema harmonization, unit normalization (mph→kph, °F→°C), bad records quarantine.
+* **Enrichment & joins**: stitch telemetry to Vehicle; attach current Delivery and Driver by time window and assignment tables.
+* **Feature engineering**:
+
+  * Rolling 24h **fuel consumption (l/100km)** using distance from GPS or odometer deltas.
+  * **Delay signals**: `delay_minutes = current_eta - planned_eta`.
+  * **Maintenance risk** proxy: weighted score on `engine_temp anomalies`, `vibration/OBD codes if available`, `odometer since last service`, `urgent alerts in past 7d`.
+  * **Health score** (0–100): `100 - (w1*temp_zscore + w2*fuel_anomaly + w3*km_since_service_norm + w4*fault_code_penalty)`. Keep it transparent and editable.
+* **Outputs**
+
+  * A conformed **Vehicle Telemetry Features** table keyed by `vehicle_id, timestamp`.
+  * A **Vehicle Snapshot** view (latest per vehicle).
+  * A **Delivery Status** view (current ETA vs plan, lateness classification).
+  * A **Maintenance Due** table (vehicles within X km/days of service threshold).
+
+Schedule near-real-time (e.g., every 5 minutes) to make the workshop feel “live.”
+
+---
+
+### 3) Metrics: a single source of truth for KPIs
+
+Define metrics with filters, aggregation, and freshness rules:
+
+* **Fuel Consumption (l/100km)**
+  Level: Vehicle, Fleet, Region; Window: rolling 24h and 7d; Freshness SLA: 10 min.
+* **Average Delivery Time** and **On-Time %**
+  Derived from Delivery Status; grouped by region/route.
+* **Delayed Deliveries Count**
+  `status in ('At-Risk','Delayed')`; alert threshold configurable.
+* **Health Score** (Vehicle)
+  Latest snapshot; flag **Critical** below, say, 40.
+
+These metrics are referenceable everywhere (Workshop tiles, Fusion Decisions), with built-in lineage back to TDS nodes.
+
+---
+
+### 4) Workshop: the command-center app
+
+Build a single-page app that ops can actually run:
+
+* **Header filters**: Region, Fleet, Time window. A search for `vehicle_id` / `delivery_id`.
+* **Alert banner** (driven by Metrics): “7 vehicles critical | 23 deliveries at risk.”
+* **Live telemetry charts**:
+
+  * Per-vehicle time series of `engine_temp` and `fuel_rate`.
+  * Fleet-level distribution of health scores.
+* **Delayed deliveries panel**: sortable table with `delivery_id`, `vehicle`, `planned_eta`, `current_eta`, `delay_minutes`, `cause_signal` (traffic, maintenance risk, driver hours nearing limit).
+* **Maintenance due table**: `vehicle_id`, `km_since_service`, `next_due_date`, `health_score`, **Action button** (“Create Maintenance Ticket”).
+* **Vehicle detail drawer** (click a row): sparkline of last 6h telemetry, driver info, open work orders, **Action** buttons.
+
+All data you show comes from the Ontology and Metrics, so it’s consistent and explainable.
+
+---
+
+### 5) Actions: turning insight into workflow
+
+Wire **Actions** to your Ontology methods so users can do things directly:
+
+* **Create Maintenance Ticket** (on Vehicle): opens a form pre-filled with `vehicle_id`, `health_score`, and suggested reason (e.g., “Sustained high engine temp + overdue service”). On submit, it writes to your maintenance system/table and returns the ticket ID. The Vehicle detail updates to show it under “Open Work Orders.”
+* **Notify Dispatcher** (on Delivery/Vehicle): quick message template to re-sequence stops or plan a swap.
+
+Actions are audited (who did what, when) and can be invoked by humans or programmatically by Fusion Decisions.
+
+---
+
+### 6) Fusion Decisions: codify the “when & why”
+
+Capture the operational playbook as decision logic that runs on a schedule or event:
+
+* **Decision inputs**: latest **Health Score**, **km since last service**, **engine_temp anomalies in past 60 min**, **delayed deliveries count by vehicle**, **shop capacity**.
+* **Rules example**:
+
+  1. If `health_score < 40` **AND** `km_since_last_service > interval` → **Create Maintenance Ticket** (priority = High).
+  2. If `delivery.status = At-Risk` **AND** `eta_slip > 20 min` **AND** `nearby spare vehicle exists` → **Notify Dispatcher** with suggested swap.
+  3. If `fuel_consumption > fleet_p95 for 3h` → flag **Fuel Efficiency Alert** and open a medium-priority ticket for inspection.
+* **Outcomes**: automatically fire the **Actions** above, tag the objects (so they appear at the top of the Workshop tables), and write back a decision log for audit.
+
+This is where your demo shows real autonomy: the system not only surfaces risk but also **acts** on it.
+
+---
+
+## How this solves the problem (tie it back to outcomes)
+
+* **Shared, real-time picture:** The Ontology gives operations, maintenance, and dispatch the same objects, same statuses, and same definitions.
+* **Early detection:** TDS features and Metrics detect anomalies (thermal, fuel, lateness) within minutes—not days—reducing breakdowns and missed SLAs.
+* **From insight to action:** Operators don’t swivel-chair into other systems. **Actions** and **Fusion Decisions** close the loop (tickets created, dispatch notified) with traceability.
+* **Continuous improvement:** Because metrics have lineage, you can iterate on the health score formula, thresholds, and decision rules transparently.
+
+---
+
+## Suggested workshop flow (60–90 minutes)
+
+1. **Kickoff (5 min):** Describe the business problem and the target KPIs.
+2. **Data to features (15 min):** Show TDS pipeline graph; open a node to reveal the health score computation; run it.
+3. **Trustworthy numbers (10 min):** Open Metrics; show definitions and freshness; trace lineage back to TDS.
+4. **Operate the fleet (20–25 min):** Use Workshop:
+
+   * Filter to one region; watch alerts update.
+   * Drill into a critical vehicle; show telemetry trend.
+   * Click **Create Maintenance Ticket**; see ticket appear on the object.
+5. **Autonomy (10–15 min):** Open Fusion Decisions; toggle a rule; execute; watch tickets auto-create and the Workshop refresh.
+6. **Q&A and extensions (10–15 min).**
+
+---
+
+## Sample data model (you can fake this for the demo)
+
+* **Telemetry** (stream/sim): `timestamp, vehicle_id, speed_kph, engine_temp_c, fuel_used_l, odometer_km, lat, lon`
+* **Deliveries**: `delivery_id, vehicle_id, planned_eta, current_eta, origin, destination, status`
+* **Maintenance**: `vehicle_id, last_service_date, service_interval_km, open_ticket_id`
+* **Drivers**: `driver_id, name, region, safety_score`
+* **Assignments**: `vehicle_id, driver_id, effective_start, effective_end`
+
+Seed 200–500 vehicles; trickle telemetry every minute; randomly push some into “hot engine” or “over-consuming fuel” patterns to make the alerting pop.
+
+---
+
+## Concrete metric and rule definitions (ready to copy)
+
+* **Fuel consumption (l/100km, 24h)**
+  `100 * sum(fuel_used_l over 24h) / (max(odometer_km) - min(odometer_km))`
+* **Average delivery time (last 7d)**
+  `avg(actual_arrival_time - departure_time)` for completed deliveries.
+* **Health score (0–100)**
+  `100 - (25*z(engine_temp) + 25*fuel_anomaly + 30*km_since_service_norm + 20*fault_code_flag)` clipped to [0,100].
+* **Fusion rule (maintenance):**
+  If `health_score < 40` OR (`engine_temp_z > 3` for ≥15 min) OR (`km_since_service > interval + 2,000km`) → `CreateMaintenanceTicket(priority='High')`.
+
+---
+
+## Governance, lineage, and roles (so it’s credible)
+
+* **Lineage:** Metrics → TDS nodes → raw sources; demo “where did this number come from?”
+* **Access:** Read for ops teams; write for Actions only; PII kept in Driver with row-level access by region.
+* **Observability:** Pipeline schedules and SLAs visible; quick remediation if a job is late.
+
+---
+
+## “Why Foundry?” (closing narrative you can say aloud)
+
+“With Foundry we modeled Vehicles, Deliveries, and Drivers once in the Ontology, computed trustworthy metrics in TDS, and published a Workshop app that’s live against streaming telemetry. The same objects carry action methods, so when Fusion Decisions detects a risk, it auto-creates a maintenance ticket. Operators don’t copy numbers into another tool; they operate directly on the objects with auditability and governance built in.”
+
+---
+
+### TL;DR script you can use in the demo
+
+* “Here’s our fleet. These red badges are vehicles with a **health score < 40**.”
+* “Open one—notice the **engine temp spike** and fuel anomaly. I’ll **create a maintenance ticket**; it writes back instantly.”
+* “Now I’ll **turn on an automated rule** in Fusion Decisions; it detects three more at-risk vehicles and auto-creates tickets.”
+* “Because the **metrics are authoritative**, ops and maintenance see the same numbers everywhere.”
+
+If you want, I can draft the exact Ontology object schemas, sample TDS node logic (SQL/Python snippets), and a Workshop layout JSON you can paste in to jump-start the build.
