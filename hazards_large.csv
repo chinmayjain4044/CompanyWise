@@ -1,0 +1,5 @@
+zone_id,hazard_type,polygon,severity
+HZ001,flood,"{""type"":""Polygon"",""coordinates"":[...]}",1
+HZ002,heatwave,"{""type"":""Polygon"",""coordinates"":[...]}",1
+HZ003,earthquake,"{""type"":""Polygon"",""coordinates"":[...]}",1
+HZ004,corrosion,"{""type"":""Polygon"",""coordinates"":[...]}",2
